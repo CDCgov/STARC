@@ -1,0 +1,196 @@
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Banner when running App
+if( exists("app_run")) {
+   showModal(modalDialog("Generating Hot Spots", footer=NULL))
+}
+
+
+## ----setup, include=FALSE------------------------------------------------------------------------------------------------------------------------------------------------------------------
+time_start <- Sys.time()
+if(! exists("app_run")) {
+  #Establish Root Directory
+  knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+  #Parameters
+ countries="Burundi"
+ neighbor_distance= 1700
+ 
+}
+dogdensfx = FALSE
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+country_folder <- paste("Inputs/Country_Files/",countries,sep="")
+
+output_folder <- paste0("Outputs/Country_Outputs/",countries )
+
+folder <- paste0("Outputs/Country_Outputs/",countries, "/Clusters" )
+
+dir.create(folder, recursive = TRUE)
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Read STARC File
+file <- paste0(output_folder,"/STARC_Map.shp")
+starc_code_ <- st_read(file)
+
+# Read HDRs csv file (This needs to be manually specified per country)
+hdrs = read.csv(paste0("Inputs/HDRs/",countries,"_HDRs.csv" ))
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Merge hdrs and starc file
+starc_code_ <- starc_code_ %>% filter(st_geometry_type(geometry)=="POLYGON") %>% 
+  merge(hdrs, by="strc_cd", all.x=T) 
+
+# Calculate Pop by category (necessary later)
+starc_code_2 <- starc_code_ %>% mutate(
+                            pop_s1 = ifelse(RUC=="S1", pop_sum, NA),
+                            pop_s2 = ifelse(RUC=="S2", pop_sum, NA),
+                            pop_s3 = ifelse(RUC=="S3", pop_sum, NA),
+                            pop_s4 = ifelse(RUC=="S4", pop_sum, NA),
+                            pop_s5 = ifelse(RUC=="S5", pop_sum, NA),
+                            # All Dogs
+                            Dgs_s1_A = ifelse(RUC=="S1", pop_sum/All_HDR, NA),
+                            Dgs_s2_A = ifelse(RUC=="S2", pop_sum/All_HDR, NA),
+                            Dgs_s3_A = ifelse(RUC=="S3", pop_sum/All_HDR, NA),
+                            Dgs_s4_A = ifelse(RUC=="S4", pop_sum/All_HDR, NA),
+                            Dgs_s5_A = ifelse(RUC=="S5", pop_sum/All_HDR, NA),
+                            # Free Roaming
+                            Dgs_s1_F = ifelse(RUC=="S1", pop_sum/Free_HDR, NA),
+                            Dgs_s2_F = ifelse(RUC=="S2", pop_sum/Free_HDR, NA),
+                            Dgs_s3_F = ifelse(RUC=="S3", pop_sum/Free_HDR, NA),
+                            Dgs_s4_F = ifelse(RUC=="S4", pop_sum/Free_HDR, NA),
+                            Dgs_s5_F = ifelse(RUC=="S5", pop_sum/Free_HDR, NA),
+                            # ZAMBIA ONLY - dog density fx
+                            dg_dns_fxA = 1.59 * exp(0.000244*pp_dnst),
+                            dg_dns_fxF = 1.59 * exp(0.000506*pp_dnst),
+                            dg_pp_fxA = dg_dns_fxA*ar_sqkm,
+                            dg_pp_fxF = dg_dns_fxF*ar_sqkm
+                            ) %>% rowwise() %>% 
+                            mutate(
+              dg_pp_A= sum(Dgs_s1_A, Dgs_s2_A, Dgs_s3_A, Dgs_s4_A,Dgs_s5_A, na.rm=T ),
+              dg_pp_F= sum(Dgs_s1_F, Dgs_s2_F, Dgs_s3_F, Dgs_s4_F,Dgs_s5_F, na.rm=T )
+                                                        )
+starc_code_2 <-starc_code_2 %>% mutate(
+  dg_dns_A = round(dg_pp_A/ar_sqkm, digits=3),
+  dg_dns_F = round(dg_pp_F/ar_sqkm, digits=3) )
+starc_code_2$id <- seq_along(data.frame(starc_code_2%>%st_drop_geometry())[,2])
+
+if(dogdensfx){
+  starc_code_2 = starc_code_2 %>% 
+    dplyr::select(-dg_pp_A,-dg_pp_F,-dg_dns_A,-dg_dns_F) %>%
+    rename(dg_pp_A = dg_pp_fxA, dg_pp_F = dg_pp_fxF,
+           dg_dns_A = dg_dns_fxA, dg_dns_F = dg_dns_fxF,)
+}
+if(!dogdensfx){
+  starc_code_2 = starc_code_2 %>% 
+    dplyr::select(-dg_pp_fxA,-dg_pp_fxF,-dg_dns_fxA,-dg_dns_fxF)
+}
+
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# country1SL <- starc_code_2
+# country2GU <- starc_code_2
+# country3LI <- starc_code_2
+# country4CI <- starc_code_2
+# # country5 <- starc_code_2
+# 
+# starc_code_2 = rbind(country1SL,
+#                     country2GU%>%st_transform(st_crs(country1SL)),
+#                     country3LI%>%st_transform(st_crs(country1SL)),
+#                     country4CI%>%st_transform(st_crs(country1SL)))
+
+
+
+# country1 <- starc_code_2
+# country2 <- starc_code_2
+# 
+# country11 = country1%>%dplyr::select(-"shapeName.1",-"shapeISO.1",-"shapeID.1",
+#                                      -"shapeGroup.1",-"shapeType.1")
+# country22 = country2%>%dplyr::select(-"All_HDR.x",-"Free_HDR.x",-"reg.x",-"All_HDR.y",-"Free_HDR.y",-"reg.y")
+# 
+# starc_code_2 = rbind(country11,
+#                     country22)
+# 
+# hdrs = read.csv(paste0(country_folder, "/",countries,"_HDRs.csv" ))
+# 
+# test = starc_code_2[starc_code_2$shapeName=="Bali",]
+
+# countryTL <- starc_code_2
+# # countryIN <- starc_code_2
+#
+# starc_code_2 = rbind(country2,
+                    # country1%>%st_transform(st_crs(country2))%>%dplyr::select(names(country2)))
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function_using_spdep <- function(pts, min, max) {
+  nc <- 7L # number of cores
+  cores_opt <- set.coresOption(nc)
+  mc_opt <- set.mcOption(FALSE)
+  cl <- parallel::makeCluster(get.coresOption())
+  set.ClusterOption(cl)
+  on.exit({
+    set.coresOption(cores_opt)
+    set.mcOption(mc_opt)
+    set.ClusterOption(NULL)
+    parallel::stopCluster(cl)
+  })
+
+  # do spdep stuff
+  dneigh <- dnearneigh(pts, min, max)
+  return(dneigh)
+}
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+a=  Sys.time()
+# Get all neighbors for the centroids of each hexagon within certain distance (only "neighbor" if centroid is within that distance)
+dnb = function_using_spdep(st_coordinates(st_centroid(starc_code_2)), 0, neighbor_distance)
+b=Sys.time()
+b-a
+
+# Make each point it's own neighbor, necessary for the gi* statistic
+dnb_self = include.self(dnb) 
+
+# construct a row-standardised weights matrix. Row standardization involves dividing each neighbor weight for a feature by the sum of all neighbor weights for that feature, and is recommended whenever the distribution of your features is potentially biased due to sampling design or an imposed aggregation scheme. https://rpubs.com/tskam/IS415-Hands-on_Ex07 
+dnb_lw <- nb2listw(dnb_self, style = 'B', zero.policy = T)
+
+# Calculate the actual Gi* statistic based on SOME quantatitative variable (dog density, dog frequency, etc) which is also essentially a unstandardized Z score
+gi.fixed <- localG(starc_code_2$dg_dns_F , dnb_lw,alternative="greater") # or use dg_pp_F (free roaming dog population...not density)
+gi_test_info = data.frame(attr(gi.fixed,"internals")) %>% mutate(Pr.z...E.G.i.. = round(Pr.z...E.G.i.., digits=6), 
+                                                                 cluster= attr(gi.fixed,"cluster"))
+
+  
+# Standardize the Z score
+gi_sig <- spdep::hotspot(gi.fixed, "Pr(z > E(G*i))", cutoff=0.005,droplevels=T)# Room to edit the cut off!!!!!
+table(gi_sig, useNA="always")
+
+starc_code_2$gi_sig = gi_sig # "Hot" or not
+starc_code_2$Gi_value = gi_test_info$G.i # the actual Gi* value (not important)
+starc_code_2$adj_zsc=gi_test_info$"Pr.z...E.G.i.." # the adjusted P-value
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+st_write(starc_code_2, paste(folder, "/starc_code_gi.shp", sep=""), overwtite=T, append=F)
+
+beep(10)
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# End banner when running App
+if( exists("app_run")) {
+removeModal()
+}
+

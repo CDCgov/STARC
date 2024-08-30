@@ -1,0 +1,372 @@
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Banner when running App
+if( exists("app_run")) {
+   showModal(modalDialog("Generating Clusters and Maps", footer=NULL))
+}
+
+
+## ----setup, include=FALSE------------------------------------------------------------------------------------------------------------------------------------------------------------------
+time_start <- Sys.time()
+if(! exists("app_run")) {
+  #Establish Root Directory
+  knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+  #Parameters
+  countries="Burundi"
+  }
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+buffer=500
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# countries="Malawi"
+country_folder <- paste("Inputs/Country_Files/",countries,sep="")
+
+output_folder <- paste0("Outputs/Country_Outputs/",countries )
+
+folder <- paste0("Outputs/Country_Outputs/",countries, "/Clusters" )
+
+dir.create(folder, recursive = TRUE)
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ctry_border = st_read(paste0(country_folder,"/borders/admin_0_rgeo.shp" ))
+
+# best CRS for this country
+country_project = suggest_crs(ctry_border, gcs = 4326)[1,]
+country_crs = country_project$crs_code
+
+# transform the country border to best crs
+ctry_border =st_transform(ctry_border, crs=as.numeric(country_crs))
+
+# Read in the regions
+regions = st_read(paste0(country_folder,"/borders/admin_1_rgeo.shp" ))
+# Convert regions to best crs
+regions =st_transform(regions, crs=as.numeric(country_crs))%>% dplyr::select(shapeName=shapeNm ,shapeGroup=shapGrp,shapeType=shapTyp ) #%>% dplyr::select(shapeName ,shapeGroup,shapeType ) #   
+
+
+# Sub Regions
+sub_region = st_read( paste0(country_folder,"/borders/admin_2_rgeo.shp"))
+sub_region = st_transform(sub_region, crs(ctry_border))
+# Recreate with both sub region and regional names
+sub_regions2 = sub_region %>% st_join(regions %>% dplyr::select("Region"="shapeName"), largest=T) %>% dplyr::select(Region,"Sub_reg"="shapeNm")  #"Sub_reg"="shapeName") # 
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+starc_code_2 = st_read(paste(folder, "/starc_code_gi.shp", sep=""))
+hexes_cluster_final2 = st_read( paste(folder, "/hexes_in_cluster_final_", buffer,".shp", sep=""))
+Cluster_outlines = st_read( paste(folder, "/cluster_outlines_", buffer,".shp", sep=""))
+
+starc_unify = st_read(paste(output_folder, "/map_starc_unify.shp", sep=""))  
+
+hot_spot_stats = st_read(paste(folder, "/hot_spot_outlines.shp", sep=""))
+
+transmission_zones = st_read(paste(folder, "/zones_buffer_",buffer,".shp", sep="")) %>%
+  mutate(level = factor(level, levels = c("Transmission","Susceptible"), labels = c("Transmission","Susceptible")))
+transmission_clusters = st_read(paste(folder, "/zones_area_",buffer,".shp", sep="")) %>%
+  mutate(level = factor(level, levels = c("Transmission","Susceptible"), labels = c("Transmission","Susceptible")))
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Unified STARC Map Created in create_map.RMD
+#STARC_unify = st_read(paste0(output_folder, "/map_starc_unify.shp"))
+
+# Open Street Map Layer (using library tmaptools)
+osm_NLD <- tmaptools::read_osm(ctry_border, ext=1.1)
+
+# Roads
+roads <- st_read(paste0(country_folder,"/gis_osm_roads_free_1.shp" )) %>% filter(Road_class %in% c("Primary", "Secondary"))
+roads <- st_transform(roads, crs(ctry_border))
+
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+All_Other_Hexes = starc_unify
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Assigning a ordered numeric ID to the STARC Codes. This is needed for tmap_polygons() to recognize the order of STARC codes when assigning pallette colors 
+  # THere are many better ways to code this, but this works for now. 
+strc_cd=sort(unique(starc_code_2$strc_cd))
+colors=colorRampPalette(RColorBrewer::brewer.pal(n = 11, name = "Spectral"))(length(strc_cd))
+
+starc_colors = data.frame(strc_cd,colors )
+
+hexes_in_cluster <- hexes_cluster_final2 %>% merge(starc_colors, by="strc_cd", all.x=T)
+
+All_Other_Hexes = starc_unify  %>% merge(starc_colors, by="strc_cd", all.x=T)
+
+
+
+
+Hot_Spots = hot_spot_stats # to create borders of the hotspots outlined
+
+prim_hexes = hexes_in_cluster %>% filter(Rep_pri=="primary")
+sec_hexes = hexes_in_cluster %>% filter(Rep_pri=="secondary")
+tert_hexes = hexes_in_cluster %>% filter(Rep_pri=="tertiary")
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#tmap_options(check.and.fix = TRUE)
+png_map <-tm_shape(osm_NLD) + tm_rgb()+
+  tm_shape(ctry_border) + 
+          tm_borders(lwd =1) + 
+          tm_fill(col="white", alpha=0.6,popup.vars=FALSE)+
+  tm_shape(regions) + 
+          tm_borders(lwd =2) +
+          #tm_fill( alpha=0,id="")+
+  tm_shape(sub_regions2) + 
+          tm_borders(lwd =0.5) +
+          tm_fill( alpha=0,id="")+
+  tm_shape(roads) +
+          tm_lines(lwd=0.5, col="Road_class", palette=c("brown", "blue"),lty="dashed",legend.col.show=T, legend.lwd.show=F) + 
+  tm_shape(Cluster_outlines) + 
+          tm_polygons(a=0.6, lwd=0.1, id="cluster_id", col="Rep_pri", palette=c("red","blue", "pink")) + #,col="#000000" + 
+  tm_shape(hexes_in_cluster) + 
+          tm_polygons( border.alpha=0,
+                      col="colors",title="STARC Codes", legend.hist=F, id="strc_cd") +
+  tm_shape(Hot_Spots) + 
+          tm_borders(alpha=0.9,lwd =0.4, col="black") +
+
+  tm_layout(main.title=paste(countries,": Cluster MAP", sep=""), main.title.position = c('center', 'top'), legend.outside = TRUE, legend.outside.position = "right")+ 
+  tm_add_legend(type = "line", 
+                col = c("black"),
+                lwd = c(0.4),
+                #lty = c(1, 4, 1),
+                #labels = c("aaa", "bbb", "ccc"),
+                title = "Hot Spots") +
+  
+  tm_add_legend(type = "fill", labels = strc_cd,col = colors,border.lwd = 0.5,title = "STARC Codes")+
+  tm_compass(type = "8star", size = 4, position = c("right", "top"))+
+  tm_scale_bar()
+
+tmap_save(tm=png_map, filename= paste(folder, "/Clusters_",buffer,".png", sep=""), dpi=1300)
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+reds = tmaptools::get_brewer_pal("YlOrRd", n = 5)
+
+png_zone <-tm_shape(osm_NLD) + tm_rgb()+
+  tm_shape(ctry_border) + 
+          tm_borders(lwd =1) + 
+  tm_shape(regions) + 
+          tm_borders(lwd =2) +
+  tm_shape(sub_regions2) + 
+          tm_borders(lwd =0.5) +
+  tm_shape(roads) +
+          tm_lines(lwd=0.5, col="Road_class", palette=c("dodgerblue4", "dodgerblue"),lty="dashed",legend.col.show=T, legend.lwd.show=F) + 
+  tm_shape(transmission_zones) + tm_fill(col = reds[1], alpha = 1) + tm_borders(lwd = .3, col = "black") + 
+  tm_shape(transmission_clusters) + tm_fill(col = reds[3], alpha = 1) +
+  tm_shape(Hot_Spots) + tm_fill(col = reds[5], alpha = 1) +
+  tm_add_legend(type = "fill", col = c(reds[c(1,3,5)]), labels = c("Transmission Zones","Clusters","Hot Spots"), border.alpha = 0, title = "Risk Area") +
+  tm_layout(main.title=paste(countries,": Risk Map", sep=""), main.title.position = c('center', 'top'), legend.outside = TRUE, legend.outside.position = "right")+ 
+  # tm_add_legend(type = "fill", labels = strc_cd,col = colors,border.lwd = 0.5,title = "STARC Codes")+
+  tm_compass(type = "8star", size = 4, position = c("right", "top"))+
+  tm_scale_bar()
+
+
+tmap_save(tm=png_zone, filename= paste(folder, "/Zone_Map_",buffer,".png", sep=""), dpi=1300)
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+png_risk <- tm_shape(osm_NLD) + tm_rgb()+
+  tm_shape(ctry_border) + 
+          tm_borders(lwd =1) + 
+  tm_shape(regions) + 
+          tm_borders(lwd =2) +
+  tm_shape(sub_regions2) +
+          tm_borders(lwd =0.5) +
+  tm_shape(transmission_zones) + tm_fill(col = "level", alpha = .5, palette = c("#BE1826","#3A55A4")) + 
+  # tm_borders(lwd = .3, col = "black") + 
+  tm_shape(transmission_clusters) + tm_fill(col = "level", alpha = .5, palette = c("#BE1826","#3A55A4"),
+                                            legend.show = FALSE) +
+  # tm_shape(Hot_Spots) + tm_fill(col = reds[5], alpha = .7) +
+  tm_layout(main.title=paste(countries,": Risk Map", sep=""), main.title.position = c('center', 'top'), legend.outside = TRUE, legend.outside.position = "right")+ 
+  tm_compass(type = "8star", size = 2, position = c("right", "top"))+
+  tm_scale_bar()
+
+
+tmap_save(tm=png_risk, filename= paste(folder, "/Risk_Map_",buffer,".png", sep=""), dpi=1300)
+
+
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+html_map <-tm_shape(osm_NLD) + tm_rgb()+
+  tm_shape(ctry_border) + 
+          tm_borders(lwd =1) + 
+          tm_fill(col="white", alpha=0.6,popup.vars=FALSE)+
+  tm_shape(regions) + 
+          tm_borders(lwd =2) +
+  tm_shape(sub_regions2) + 
+          tm_borders(lwd =0.5) +
+          tm_fill( alpha=0,id="")+
+ 
+  tm_shape(All_Other_Hexes) + 
+          tm_polygons(col="colors", border.alpha=0,title="ALL Other STARC Units", legend.hist=F, id="strc_cd") +
+  tm_shape(Cluster_outlines) + 
+          tm_polygons(a=0.6, lwd=0.1, id="cluster_id", title="Cluster Outlines",col="Rep_pri", palette=c("red","blue", "pink"),popup.vars=colnames(Cluster_outlines)[colnames(Cluster_outlines)!="geometry"]) + 
+  
+  tm_shape(prim_hexes) + 
+          tm_polygons( border.alpha=0,
+                      col="colors",title="Primary Cluster", legend.hist=F, id="strc_cd") 
+
+if(nrow(sec_hexes)>0){
+  html_map=html_map+tm_shape(sec_hexes) + 
+          tm_polygons( border.alpha=0,
+                      col="colors",title="Secondary Cluster", legend.hist=F, id="strc_cd")
+}
+if(nrow(tert_hexes)>0){
+  html_map=html_map+tm_shape(tert_hexes) + 
+          tm_polygons( border.alpha=0,
+                      col="colors",title="Tertiary Cluster", legend.hist=F, id="strc_cd") 
+}
+
+html_map = html_map +
+  tm_shape(Hot_Spots) + 
+          tm_borders(alpha=0.9,lwd =0.4, col="black") +
+   tm_shape(roads) +
+          tm_lines(lwd=0.5, col="Road_class", palette=c("brown", "blue"),lty="dashed",legend.col.show=T, legend.lwd.show=F) +
+  
+
+  tm_layout(main.title=paste(countries,": Cluster MAP", sep=""), main.title.position = c('center', 'top'), legend.outside = TRUE, legend.outside.position = "right")+ 
+  tm_add_legend(type = "line", 
+              col = "black",
+              lwd = 0.4,
+              #lty = c(1, 4, 1),
+              #labels = c("aaa", "bbb", "ccc"),
+              title = "Hot Spots") +
+  tm_add_legend(type = "fill", labels = strc_cd,col = colors,border.lwd = 0.5,title = "STARC Codes")+
+  tm_compass(type = "8star", size = 4, position = c("right", "top"))+
+  tm_scale_bar()
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+tmap_options(check.and.fix = TRUE)
+html_map2=  addDrawToolbar(map= tmap_leaflet(html_map))%>%
+  hideGroup("All_Other_Hexes") #%>%
+  #addMeasure()# %>% # https://rstudio.github.io/leaflet/morefeatures.html
+  #addResetMapButton() %>% #https://www.r-bloggers.com/2019/12/quick-tips-for-customizing-your-r-leaflet-map/
+  #addSearchFeatures(targetGroups=Cluster_outlines) #https://cran.r-project.org/web/packages/leaflet.extras/leaflet.extras.pdf
+
+saveWidget(html_map2, file= paste(folder, "/Cluster2_",buffer,".html", sep=""), selfcontained=F)
+
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+html_zone <-tm_shape(osm_NLD) + tm_rgb()+
+  tm_shape(ctry_border) + 
+          tm_borders(lwd =1) + 
+  tm_shape(regions) + 
+          tm_borders(lwd =2) +
+  tm_shape(sub_regions2) + 
+          tm_borders(lwd =0.5) +
+  tm_shape(All_Other_Hexes) + 
+          tm_polygons(col="colors", border.alpha=0,title="ALL Other STARC Units", legend.hist=F, id="strc_cd", alpha = .6) +
+  tm_shape(hexes_in_cluster) + 
+          tm_polygons( border.alpha=0, alpha = .6,
+                      col="colors",title="Primary Cluster", legend.hist=F, id="strc_cd") +
+  tm_shape(transmission_zones) + tm_fill(col = reds[1], alpha = .8) + tm_borders(lwd = .3, col = "black") + 
+  tm_shape(transmission_clusters) + tm_fill(col = reds[3], alpha = .8) +
+  tm_shape(Hot_Spots) + tm_fill(col = reds[5], alpha = .8) +
+  tm_add_legend(type = "fill", col = c(reds[c(1,3,5)]), labels = c("Transmission Zones","Clusters","Hot Spots"),
+                border.alpha = 0, title = "Risk Area") +
+   tm_shape(roads) +
+          tm_lines(lwd=0.5, col="Road_class", palette=c("dodgerblue4", "dodgerblue"),lty="dashed",legend.col.show=T, legend.lwd.show=F) +
+  tm_layout(main.title=paste(countries,": Risk Map", sep=""), main.title.position = c('center', 'top'), legend.outside = TRUE, legend.outside.position = "right") + 
+  tm_add_legend(type = "fill", labels = strc_cd,col = colors,border.lwd = 0.5,title = "STARC Codes")+
+  tm_compass(type = "8star", size = 4, position = c("right", "top"))+
+  tm_scale_bar()
+
+# tmap_mode("plot")
+# html_map
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+html_zone2=  addDrawToolbar(map= tmap_leaflet(html_zone)) %>%
+  hideGroup(c("All_Other_Hexes","hexes_in_cluster")) #%>%
+  #addMeasure()# %>% # https://rstudio.github.io/leaflet/morefeatures.html
+  #addResetMapButton() %>% #https://www.r-bloggers.com/2019/12/quick-tips-for-customizing-your-r-leaflet-map/
+  #addSearchFeatures(targetGroups=Cluster_outlines) #https://cran.r-project.org/web/packages/leaflet.extras/leaflet.extras.pdf
+
+saveWidget(html_zone2, file= paste(folder, "/Zone_Map_",buffer,".html", sep=""), selfcontained=F)
+
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+html_risk <-  tm_shape(osm_NLD) + tm_rgb()+
+  tm_shape(ctry_border) + 
+          tm_borders(lwd =1) + 
+  tm_shape(regions) + 
+          tm_borders(lwd =2) +
+  tm_shape(sub_regions2) +
+          tm_borders(lwd =0.5) +
+  tm_shape(All_Other_Hexes) +
+          tm_polygons(col="colors", border.alpha=0,title="ALL Other STARC Units", legend.hist=F, id="strc_cd", alpha = .6) +
+  tm_shape(hexes_in_cluster) +
+          tm_polygons( border.alpha=0, alpha = .6,
+                      col="colors",title="Primary Cluster", legend.hist=F, id="strc_cd") +
+  tm_shape(transmission_zones) + tm_fill(col = "level", alpha = .5, palette = c("#BE1826","#3A55A4")) + 
+  # tm_borders(lwd = .3, col = "black") + 
+  tm_shape(transmission_clusters) + tm_fill(col = "level", alpha = .5, palette = c("#BE1826","#3A55A4"),
+                                            legend.show = FALSE) +
+  # tm_shape(Hot_Spots) + tm_fill(col = reds[5], alpha = .7) +
+  # tm_add_legend(type = "fill", col = c(reds[c(1,3,5)]), labels = c("Transmission Zones","Clusters","Hot Spots"),
+                # border.alpha = 0, title = "Risk Area") +
+   tm_shape(roads) +
+          tm_lines(lwd=0.5, col="Road_class", palette=c("dodgerblue4", "dodgerblue"),lty="dashed",legend.col.show=T, legend.lwd.show=F) +
+  tm_layout(main.title=paste(countries,": Risk Map", sep=""), main.title.position = c('center', 'top'), legend.outside = TRUE, legend.outside.position = "right") + 
+  tm_add_legend(type = "fill", labels = strc_cd,col = colors,border.lwd = 0.5,title = "STARC Codes")+
+  tm_compass(type = "8star", size = 4, position = c("right", "top"))+
+  tm_scale_bar()
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+html_risk2=  addDrawToolbar(map= tmap_leaflet(html_risk)) %>%
+  hideGroup(c("All_Other_Hexes","hexes_in_cluster")) #%>%
+  #addMeasure()# %>% # https://rstudio.github.io/leaflet/morefeatures.html
+  #addResetMapButton() %>% #https://www.r-bloggers.com/2019/12/quick-tips-for-customizing-your-r-leaflet-map/
+  #addSearchFeatures(targetGroups=Cluster_outlines) #https://cran.r-project.org/web/packages/leaflet.extras/leaflet.extras.pdf
+
+saveWidget(html_risk2, file= paste(folder, "/Risk_Map_",buffer,".html", sep=""), selfcontained=F)
+
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#tmap_save(tm=png_map, filename= paste(folder, "/Clusters_",buffer,".png", sep=""), dpi=1300)
+
+#tmap_save(tm=html_map, filename= paste(folder, "/Clusters2_",buffer,".html", sep=""))
+
+# library(mapview)
+# mapview::mapshot(html_map2, file= paste(folder, "/Cluster_",buffer,".html", sep=""))
+
+beep(2)
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# End banner when running App
+if( exists("app_run")) {
+removeModal()
+}
+

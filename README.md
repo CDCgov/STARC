@@ -1,3 +1,20 @@
+The main functionality of this code is established, but supporting documentation is still under development. Additionally, novel uses of the STARC methodology, including identifying expected transmission zones for canine rabies, is still in development. We hope to provide more documentation and clarity regarding these new applications in the proximate future.
+
+Currently there are two ways to interact with this code:
+
+1) Run the app.R file to run a local R Shiny application. This application will allow users to select parameters and then run individual sections of the STARC Toolkit
+2) Individually run the Rmd files within the R folder. The user will have to manually specify parameters at the top of each file. A letter prefix for each Rmd file notates the order the files should be run in (for example "A_Set_up_Input_Files.Rmd" precedes "B_Create_STARC_Map_SHP.Rmd")
+
+The Rmd files are organized such that they can be run from the interactive functions within the R shiny app, or individually run within Rstudio. 
+
+
+
+
+
+
+
+
+
 # CDCgov GitHub Organization Open Source Project Template
 
 **Template for clearance: This project serves as a template to aid projects in starting up and moving through clearance procedures. To start, create a new repository and implement the required [open practices](open_practices.md), train on and agree to adhere to the organization's [rules of behavior](rules_of_behavior.md), and [send a request through the create repo form](https://forms.office.com/Pages/ResponsePage.aspx?id=aQjnnNtg_USr6NJ2cHf8j44WSiOI6uNOvdWse4I-C2NUNk43NzMwODJTRzA4NFpCUk1RRU83RTFNVi4u) using language from this template as a Guide.**

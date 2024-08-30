@@ -1,0 +1,8 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+/Outputs/Country_Outputs/*
+/Inputs/Country_Files/*
+/Inputs/HDRs/*
+!/Inputs/HDRs/Burundi_HDRs.csv

@@ -1,0 +1,454 @@
+---
+title: "Untitled"
+author: "Patrick Corbett"
+date: "10/17/2022"
+date_modified: "08/25/2024"
+output: html_document
+---
+
+# Set up directory and banner
+
+
+**Banner when running App**
+```{r}
+# Banner when running App
+if( exists("app_run")) {
+   showModal(modalDialog("Generating Outputs", footer=NULL))
+}
+```
+
+**Set Parameters for running Outside the Rshiny App**
+```{r, setup, include=FALSE}
+time_start <- Sys.time()
+if(! exists("app_run")) {
+#Establish Root Directory
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+#Parameters
+countries="Burundi"
+}
+
+```
+
+# Establish Paths
+```{r}
+# This defines what country the scrip is run for
+country<- countries 
+country_folder <- paste("Inputs/Country_Files/",country,sep="")
+#create the output directory for the country (or do nothing if it already exists)
+out_dir <- paste("Outputs/Country_Outputs/",country,sep="")
+dir.create(out_dir, recursive = TRUE, showWarnings =F)
+```
+
+# Read in input files
+  * Population data : ciesin.columbia.edu/data/hrsl/#data  
+    * *"The population estimates are based on recent census data and high-resolution (0.5m) satellite imagery from DigitalGlobe"*
+    * In practice, each cell is ~ 30 meters in height and width 
+    
+```{r}
+# Read in population raster file
+pop_rast <- raster(paste(country_folder, "/pop.tif",sep=""))
+
+# Read and transform country border
+ctry_border = st_read(paste0(country_folder,"/borders/admin_0_rgeo.shp" ))
+# Identify suggested CRS for this country (see input script for explanation)
+country_project = suggest_crs(ctry_border, gcs = 4326)[1,] #, gcs = 4326
+country_crs = country_project$crs_code
+# transform the country border
+ ctry_border =st_transform(ctry_border, crs=as.numeric(country_crs))
+
+# Read in Uber H3 hexagon grids 
+hex_grids = st_read(paste0(country_folder, "/H3_hex_grid.shp"))
+
+# Read in OSM layer
+osm_data=st_read(paste0(country_folder, "/gis_osm_roads_free_1.shp"))
+```
+
+
+# Creating polygons from buffered and dissolved rasters
+
+  * This section has high memory demands. Using other packages like sf for data processing consistently led to crashes
+  * Using the terra library (sucessor to sf) was to be the key to circumnavigate these memory problems as its SpatRast and SpatVect formats are more efficient than the data formats used by the sp, sf, and raster packages.  
+  * However, when using terra::aggregate(), using the more efficient SpatRast format led to data loss in the output aggregation. 
+  * thus we had to convert the SpatRast back into the RasterLayer format to finalize analysis. This increases computational time by ~18 minutes but it is necessary to preserve data integrity
+  * Expect this section to take around 30+ (varies depending on country size)
+
+```{r}
+timea <-Sys.time()
+# Number of Cells to Buffer Raster by: each cell is around 30 meters in length 
+buffer_cells <- 2
+
+# Create a copy of the population raster and replace all cells with the same value (1). This is important because terra::aggregate() only aggregates raster cells with the same values. With the original population raster, cells with different values were not aggregated appropriately 
+m <- c(0, 10000000000000,1)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+system.time(pop_rast_common <- classify(rast(pop_rast), rclmat, include.lowest=TRUE)) # Around 62 seconds
+
+# Convert the SpatRast back into RasterLayer format. Makes below functions take MUCH longer, but necessary to prevent data loss
+system.time(pop_rast_common2 <- raster(pop_rast_common))
+
+# Buffer and aggregate the raster cells. See the buffer_cells object above, that determines the number of cells considered in the buffer and aggregation
+system.time(dissolved_raster <- terra::aggregate(pop_rast_common2,
+                                                 fact=buffer_cells, 
+                                                 cores=6)) # Around 776-926  seconds
+
+# Convert the SpatRast into a SpatVect polygon. Then aggregate/dissolve the polygon to create a multipolygon type SpatVect
+system.time(rasts_to_poly <- terra::as.polygons(rast(dissolved_raster))) #43.83 ....29.48 seconds
+system.time(dissolved_poly <- terra::aggregate(rasts_to_poly, cores=6,dissolve=T)) # 789.05 seconds
+
+# Dissagregate the multipolygon SpatVect to a polygon type (The difference is the former represents all object as one singular polygon while the latter breaks all independent objects into different polygons)
+system.time(dissolved_poly2 <- terra::disagg(dissolved_poly)) #2.01 seconds
+
+
+# Save the globs formed from this process 
+system.time(terra::writeVector(dissolved_poly2, filename =paste(out_dir, "/buffered_raster_to_polygons.shp",sep=""), overwrite=T) ) #53.80 seconds
+
+# rm object to save memory space
+rm(pop_rast_common)
+rm(pop_rast_common2)
+rm(dissolved_raster)
+rm(rasts_to_poly)
+rm(dissolved_poly2)
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+gc()
+```
+
+
+# Extract Population by Hex Grids 
+  * Get the population density per H3 hexagon unit
+  * Takes around 31+ minutes
+  * Exact extract takes proportional overlap into account when summing the raster grids into the hexagons 
+```{r}
+timea <-Sys.time()
+
+# Proportionally extract population raster cell populations into hexagon units
+system.time(Pop_sum2 <-  exact_extract(pop_rast, hex_grids, fun="sum", progress=TRUE)) # Can take around 30 minutes
+hex_grids$pop_sum <- Pop_sum2
+hex_grids$area_sqkm <- raster::area(as_Spatial(hex_grids)) / 1000000 # Can take around 3-4 minutes
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+gc()
+
+
+```
+
+## Population Code Categorization 
+  * Categorize the Population code by population density
+```{r}
+timea <-Sys.time()
+
+
+hex_grids$pop_density <- hex_grids$pop_sum/hex_grids$area_sqkm
+
+hex_grids$RUC <- ifelse(hex_grids$pop_density>=5000, "S1", 
+                       ifelse(hex_grids$pop_density<5000 & hex_grids$pop_density>=500, "S2", 
+                              ifelse(hex_grids$pop_density<500 & hex_grids$pop_density>=50, "S3", 
+                                     ifelse(hex_grids$pop_density<50 & hex_grids$pop_density>=5, "S4", 
+                                            ifelse(hex_grids$pop_density<5 & hex_grids$pop_density>0, "S5", 
+                                                   ifelse(hex_grids$pop_density==0, "S6", 
+                                                   NA))))))
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+gc()
+
+```
+
+## editing osm data
+```{r}
+timea <-Sys.time()
+
+osm_data_class <- osm_data %>% dplyr::select(Road_class, geometry) %>% dplyr::filter(! is.na(Road_class) )
+osm_data_class<- osm_data_class %>% dplyr::select(Road_class, geometry) %>% dplyr::filter(! is.na(Road_class) )
+
+rm(osm_data)
+
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+```
+
+## Converting hexagons into sf object
+
+```{r}
+timea <-Sys.time()
+#convert hexes to sf object
+hex_shp_data <- st_as_sf(hex_grids)
+# Parameter to include hex units with 0 population. Takes longer, but for now we will hard code this to yes
+include_zeros="yes"
+if(include_zeros=="no"){
+hex_shp_data <- hex_shp_data %>% dplyr::filter(pop_sum!=0 & !is.na(pop_sum) ) # 375,730 versus 853,664
+}
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+```
+
+## Reading in the raster clumps
+```{r}
+timea <-Sys.time()
+# Read in the clumps created in step one of this script
+raster_clumps <- read_sf(dsn =  paste(out_dir, "/buffered_raster_to_polygons.shp",sep="") )
+raster_clumps = st_transform(raster_clumps, st_crs(ctry_border))
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+```
+
+## Categorizing the clump polygons by roads 
+  * This is most efficient way author could identify to categorize polygon clumps
+  * Takes around 7-9 mins
+
+```{r}
+timea <-Sys.time()
+
+raster_clumps$row_num <- 1:nrow(raster_clumps)
+
+#Filter out clumps that do not intersect any roads (not useful)
+table(osm_data_class$Road_class, useNA="always")
+acl <- st_intersects(raster_clumps$geometry,
+                                 osm_data_class$geometry, 
+                                 sparse = T)
+prim<- aggregate(col.id ~ row.id, data = data.frame(acl), FUN = paste, collapse = "; ")%>%rename("clump"="row.id", "road"= "col.id")
+hex_shp_intersect <- raster_clumps %>% filter(row_num %in% prim$clump)
+#redefine the row number
+hex_shp_intersect$row_num <- 1:nrow(hex_shp_intersect)
+
+#primary:
+acl <- st_intersects(hex_shp_intersect$geometry,
+                                 osm_data_class[osm_data_class$Road_class=="Primary",]$geometry, 
+                                 sparse = T)
+prim<- aggregate(col.id ~ row.id, data = data.frame(acl), FUN = paste, collapse = "; ")%>%rename("clump"="row.id", "road"= "col.id")
+hex_shp_intersect <- hex_shp_intersect%>% mutate(road_class=ifelse(row_num %in% prim$clump, "primary", "F")) #
+
+#secondary 
+acl <- st_intersects( hex_shp_intersect$geometry,
+                                 osm_data_class[osm_data_class$Road_class=="Secondary",]$geometry,
+                                 sparse = T)
+sec<- aggregate(col.id ~ row.id, 
+                data = data.frame(acl), 
+                FUN = paste, collapse = "; ")%>% rename("clump"="row.id", "road"= "col.id")
+hex_shp_intersect <- hex_shp_intersect%>% mutate(road_class2=ifelse(row_num %in% sec$clump, "secondary", "tertiary")) #
+
+ 
+
+hex_shp_intersect$road_class2  <- ifelse(hex_shp_intersect$row_num %in% sec$clump, "secondary", "tertiary")
+
+hex_shp_intersect$road_class3 <- ifelse(hex_shp_intersect$road_class=="primary", 
+                                        "primary", 
+                                        hex_shp_intersect$road_class2)
+
+hex_shp_intersect <- hex_shp_intersect %>% dplyr::select(row_num,road_class3, geometry )#############
+
+rm(acl)
+rm(prim)
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+
+gc()
+```
+
+# Assigning Road type to hexagons via blobs and finalizing STARC codes
+  * Using the same method as above to create the classifications
+  * around 6 minutes
+
+```{r}
+timea <-Sys.time()
+
+# set row id num
+hex_shp_data$row_num <- 1:nrow(hex_shp_data)
+
+# find hexagons that intersect blobs
+system.time(acl <- st_intersects(hex_shp_data$geometry,
+                                 hex_shp_intersect$geometry, sparse = T))#41.63  
+inter<- aggregate(col.id ~ row.id, 
+                 data = data.frame(acl), 
+                 FUN = paste, 
+                 collapse = "; ")%>%rename("hexagon"="row.id", "road"= "col.id")
+#differentiate between hexagons that intersect with blobs and those that do not
+hex_shp_intersect_BLOB <- hex_shp_data%>% filter(row_num %in% inter$hexagon)
+hex_shp_intersect_NO_BLOB<- hex_shp_data%>% filter(! row_num %in% inter$hexagon)
+
+#primary: if a hexagon intersects with a blob that itself intersects with a primary rode, the hexagon is primary
+hex_shp_intersect_BLOB$row_num_blob  <- 1:nrow(hex_shp_intersect_BLOB)# need to create additional row number column to update!!!!
+system.time(acl <- st_intersects(hex_shp_intersect_BLOB$geometry,
+                                 hex_shp_intersect[hex_shp_intersect$road_class3=="primary",]$geometry, sparse = T))#41.63  
+
+prim<- aggregate(col.id ~ row.id, 
+                 data = data.frame(acl), 
+                 FUN = paste, 
+                 collapse = "; ")%>%rename("hexagon"="row.id", "blob"= "col.id")
+hex_shp_intersect_BLOB <- hex_shp_intersect_BLOB%>% mutate(road_class=ifelse(row_num_blob %in% prim$hexagon, "primary","F")) # 
+
+#Secondary
+system.time(acl <- st_intersects( hex_shp_intersect_BLOB$geometry,
+                                 hex_shp_intersect[hex_shp_intersect$road_class3=="secondary",]$geometry,
+                                 sparse = T))#52.48 
+sec<- aggregate(col.id ~ row.id, 
+                data = data.frame(acl), 
+                FUN = paste, 
+                collapse = "; ")%>%rename("hexagon"="row.id", "blob"= "col.id")
+hex_shp_intersect_BLOB$road_class2  <- ifelse(hex_shp_intersect_BLOB$row_num_blob %in% sec$hexagon, "secondary", "F")
+table(hex_shp_intersect_BLOB$road_class2 )
+
+#Tertiary
+system.time(acl <- st_intersects( hex_shp_intersect_BLOB$geometry,
+                                 hex_shp_intersect[hex_shp_intersect$road_class3=="tertiary",]$geometry,
+                                 sparse = T))#52.48 
+tert<- aggregate(col.id ~ row.id, 
+                 data = data.frame(acl), 
+                 FUN = paste, 
+                 collapse = "; ")%>%rename("hexagon"="row.id", "blob"= "col.id")
+
+hex_shp_intersect_BLOB$road_class3  <- ifelse(hex_shp_intersect_BLOB$row_num_blob %in% tert$hexagon, "tertiary", "F")
+table(hex_shp_intersect_BLOB$road_class3 )
+
+
+#Combine
+hex_shp_intersect_BLOB$road_classF <- ifelse(hex_shp_intersect_BLOB$road_class=="primary", "primary", 
+                                          ifelse(hex_shp_intersect_BLOB$road_class2=="secondary", "secondary", 
+                                          ifelse(hex_shp_intersect_BLOB$road_class3=="tertiary", "tertiary", 
+                                          "quartet")))
+
+
+#system.time(st_write(hex_shp_intersect_BLOB, dsn = paste(dirname(mypath), "/", out_dir, "/road_check_B.shp",sep=""),driver ="ESRI Shapefile", append=F, overwrite=T)) #123.40 
+
+```
+
+# Categorize Road Vector File
+```{r}
+
+hex_shp_intersect_NO_BLOB <-hex_shp_data
+
+hex_shp_intersect_NO_BLOB$row_num_N_blob  <- 1:nrow(hex_shp_intersect_NO_BLOB)# need to create additional row number column to update!!!!
+acl <- st_intersects(hex_shp_intersect_NO_BLOB$geometry,
+                                 osm_data_class[osm_data_class$Road_class=="Primary",]$geometry, sparse = T)
+#primary
+prim<- aggregate(col.id ~ row.id, 
+                 data = data.frame(acl), 
+                 FUN = paste, 
+                 collapse = "; ")%>%rename("hexagon"="row.id", "road_id"= "col.id")
+
+hex_shp_intersect_NO_BLOB <- hex_shp_intersect_NO_BLOB%>% mutate(road_class=ifelse(row_num_N_blob %in% prim$hexagon, "primary","F")) # 
+table(hex_shp_intersect_NO_BLOB$road_class )
+
+
+#Secondary
+acl <- st_intersects( hex_shp_intersect_NO_BLOB$geometry,
+                                 osm_data_class[osm_data_class$Road_class=="Secondary",]$geometry,
+                                 sparse = T)
+sec<- aggregate(col.id ~ row.id, data = data.frame(acl), FUN = paste, collapse = "; ")%>%rename("hexagon"="row.id", "road_id"= "col.id")
+
+hex_shp_intersect_NO_BLOB$road_class2  <- ifelse(hex_shp_intersect_NO_BLOB$row_num_N_blob %in% sec$hexagon, "secondary", "F")
+table(hex_shp_intersect_NO_BLOB$road_class2 )
+
+
+
+#Tertiary
+acl <- st_intersects( hex_shp_intersect_NO_BLOB$geometry,
+                                 osm_data_class[osm_data_class$Road_class=="Tertiary",]$geometry,
+                                 sparse = T)
+tert<- aggregate(col.id ~ row.id, data = data.frame(acl), FUN = paste, collapse = "; ")%>%rename("hexagon"="row.id", "road_id"= "col.id")
+
+hex_shp_intersect_NO_BLOB$road_class3  <- ifelse(hex_shp_intersect_NO_BLOB$row_num_N_blob %in% tert$hexagon, "tertiary", "F")
+table(hex_shp_intersect_NO_BLOB$road_class3 )
+
+
+# Combine
+hex_shp_intersect_NO_BLOB$road_classF <- ifelse(hex_shp_intersect_NO_BLOB$road_class=="primary", "primary", 
+                                          ifelse(hex_shp_intersect_NO_BLOB$road_class2=="secondary", "secondary", 
+                                          ifelse(hex_shp_intersect_NO_BLOB$road_class3=="tertiary", "tertiary", 
+                                          "quartet")))
+
+
+st_write(hex_shp_intersect_NO_BLOB, dsn = paste(out_dir, "/road_check_C_V2.shp",sep=""),driver ="ESRI Shapefile", append=F, overwrite=T)
+```
+
+# combine blob and no blob classifications
+```{r}
+#edit out unique columns
+hex_shp_intersect_2<- rbind(hex_shp_intersect_BLOB %>% dplyr::select(-row_num_blob), hex_shp_intersect_NO_BLOB %>% dplyr::select(-row_num_N_blob))
+table(hex_shp_intersect_2$road_classF, useNA="ifany")
+
+hex_shp_intersect_2 = hex_shp_intersect_2 %>% dplyr::mutate(road_final = ifelse(road_classF=="primary",1,
+                                                                               ifelse(road_classF=="secondary",2,
+                                                                                      ifelse(road_classF=="tertiary",3,
+                                                                                             ifelse(road_classF=="quartet",4, NA)))))%>%
+  mutate(starc_code = paste(RUC, road_final, sep=".")) %>% dplyr::select(pop_sum, area_sqkm, pop_density, RUC,road_classF ,road_final,starc_code,h3_address, geometry  ) %>% 
+  # Added starc code as factor for full legend every time
+  mutate(starc_code = factor(starc_code, levels = c("S1.1","S1.2","S2.1","S2.2",
+                                    "S1.3","S2.3","S3.1","S3.2","S3.3",
+                                    "S1.4","S2.4","S4.1","S4.2","S3.4","S4.3","S4.4",
+                                    "S5.1","S5.2","S5.3","S5.4","S6.1","S6.2","S6.3","S6.4"),
+                                             labels = c("S1.1","S1.2","S2.1","S2.2",
+                                    "S1.3","S2.3","S3.1","S3.2","S3.3",
+                                    "S1.4","S2.4","S4.1","S4.2","S3.4","S4.3","S4.4",
+                                    "S5.1","S5.2","S5.3","S5.4","S6.1","S6.2","S6.3","S6.4")))
+
+
+# The below will groupby h3_address codes and choose the lowest road_final category. If a hexagon was classified as 2 via road line and 3 via community blob, the end classification is 2. Before the road blob classification was the final classification regardless if a road line ran through it or not. 
+hex_shp_intersect_2_final =  hex_shp_intersect_2 %>%    
+  group_by(h3_address) %>%                              
+  slice(which.min(road_final))                          
+
+table(hex_shp_intersect_2$starc_code, useNA="ifany")
+table(hex_shp_intersect_2_final$starc_code, useNA="ifany")
+```
+
+# Save Final STARC shp file
+```{r}
+
+# The below saves the final draft map!!
+st_write(hex_shp_intersect_2_final,          
+                     dsn = paste(out_dir, "/STARC_Map.shp",sep=""),
+                     driver ="ESRI Shapefile", 
+                     append=F, 
+                     overwrite=T)
+
+rm(acl)
+rm(prim)
+
+timeb <- Sys.time()
+difftime(timeb,timea, units = "mins")
+
+gc()
+```
+
+# Summary Stats
+
+```{r}
+total_h_pop_raster =cellStats(pop_rast, sum)
+total_h_pop_STARC = sum(hex_shp_intersect_2$pop_sum)
+STARC_pop_perc_error = ((total_h_pop_raster-total_h_pop_STARC)/total_h_pop_raster)*100
+
+num_s1_hexs=table(hex_shp_intersect_2$RUC)[[1]]
+num_s2_hexs=table(hex_shp_intersect_2$RUC)[[2]]
+num_s3_hexs=table(hex_shp_intersect_2$RUC)[[3]]
+num_s4_hexs=table(hex_shp_intersect_2$RUC)[[4]]
+num_s5_hexs=table(hex_shp_intersect_2$RUC)[[5]]
+sum_data = data.frame(total_h_pop_raster,total_h_pop_STARC,STARC_pop_perc_error,
+                      num_s1_hexs, num_s2_hexs, num_s3_hexs, num_s4_hexs, num_s5_hexs )
+
+write.csv(sum_data, paste(out_dir, "/starc_beginning_stats.csv",sep=""))
+```
+
+
+**The total time it takes to run this**
+```{r}
+time_end <- Sys.time()
+difftime(time_end,time_start, units = "mins")
+beepr::beep(10)
+```
+
+
+
+```{r}
+# End banner when running App
+if( exists("app_run")) {
+removeModal()
+}
+```
+
+
