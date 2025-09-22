@@ -319,9 +319,6 @@ hex_shp_intersect_BLOB$road_classF <- ifelse(hex_shp_intersect_BLOB$road_class==
 
 # Categorize Road Vector File
 ```{r}
-
-hex_shp_intersect_NO_BLOB <-hex_shp_data
-
 hex_shp_intersect_NO_BLOB$row_num_N_blob  <- 1:nrow(hex_shp_intersect_NO_BLOB)# need to create additional row number column to update!!!!
 acl <- st_intersects(hex_shp_intersect_NO_BLOB$geometry,
                                  osm_data_class[osm_data_class$Road_class=="Primary",]$geometry, sparse = T)
